@@ -126,16 +126,17 @@ type ResourceConfig struct {
 	// IsARNPrimaryKey determines whether the CRD uses the ARN as the primary
 	// identifier in the ReadOne operations.
 	IsARNPrimaryKey bool `json:"is_arn_primary_key"`
-	// IsPrimaryKeyOptional, when true, tells the code generator to treat the
-	// primary key field as optional when populating the resource from an
-	// adoption annotation. PopulateResourceFromAnnotation still reads and sets
-	// the primary key (and any additional identifier fields), but no longer
-	// returns a "required field missing" terminal error when it is absent. Use
-	// this for resources that can be identified by one of several
-	// mutually-exclusive fields (for example, a policy keyed by name OR by
-	// resource ARN) so adoption succeeds with whichever field(s) the user
-	// supplies.
-	IsPrimaryKeyOptional bool `json:"is_primary_key_optional"`
+	// MutuallyExclusiveIdentifiers lists the resource's identifier fields (by
+	// their configuration/original names, e.g. PolicyName, ResourceArn) when a
+	// resource has no single mandatory identifier but is instead identified by
+	// exactly one of several mutually-exclusive fields. When set, adoption
+	// treats each listed field as optional (populating whichever the user
+	// supplies) but requires that exactly one of them is present:
+	// PopulateResourceFromAnnotation returns a terminal error if none or more
+	// than one is supplied. This prevents an empty or misspelled adoption
+	// annotation from silently matching an arbitrary resource. Requires at
+	// least two fields and is incompatible with is_arn_primary_key.
+	MutuallyExclusiveIdentifiers []string `json:"mutually_exclusive_identifiers,omitempty"`
 	// TagConfig contains instructions for the code generator to generate
 	// custom code for ensuring tags
 	TagConfig *TagConfig `json:"tags,omitempty"`
@@ -522,18 +523,18 @@ func (c *Config) ResourceIsAdoptable(resourceName string) bool {
 	return *rConfig.IsAdoptable
 }
 
-// ResourceIsPrimaryKeyOptional returns true if the resource is configured to
-// treat its primary key field as optional when populating the resource from an
-// adoption annotation (is_primary_key_optional: true).
-func (c *Config) ResourceIsPrimaryKeyOptional(resourceName string) bool {
+// ResourceMutuallyExclusiveIdentifiers returns the list of mutually-exclusive
+// identifier field names configured for the resource (see
+// mutually_exclusive_identifiers), or nil if none are configured.
+func (c *Config) ResourceMutuallyExclusiveIdentifiers(resourceName string) []string {
 	if c == nil {
-		return false
+		return nil
 	}
 	rConfig, ok := c.Resources[resourceName]
 	if !ok {
-		return false
+		return nil
 	}
-	return rConfig.IsPrimaryKeyOptional
+	return rConfig.MutuallyExclusiveIdentifiers
 }
 
 // ResourceContainsAttributesMap returns true if the underlying API has

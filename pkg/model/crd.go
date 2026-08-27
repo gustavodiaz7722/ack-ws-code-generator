@@ -464,12 +464,46 @@ func (r *CRD) IsARNPrimaryKey() bool {
 	return resGenConfig.IsARNPrimaryKey
 }
 
-// IsPrimaryKeyOptional returns true if the CRD is configured to treat its
-// primary key as optional when populating the resource from an adoption
-// annotation. When true, PopulateResourceFromAnnotation still sets the primary
-// key when present but does not require it.
-func (r *CRD) IsPrimaryKeyOptional() bool {
-	return r.cfg.ResourceIsPrimaryKeyOptional(r.Names.Original)
+// HasMutuallyExclusiveIdentifiers returns true if the CRD is configured with a
+// set of mutually-exclusive identifier fields (see
+// mutually_exclusive_identifiers).
+func (r *CRD) HasMutuallyExclusiveIdentifiers() bool {
+	return len(r.cfg.ResourceMutuallyExclusiveIdentifiers(r.Names.Original)) > 0
+}
+
+// GetMutuallyExclusiveIdentifierFields resolves the configured
+// mutually_exclusive_identifiers names to their CRD Fields, preserving the
+// configured order. It returns an error if a configured name does not match a
+// known field.
+func (r *CRD) GetMutuallyExclusiveIdentifierFields() ([]*Field, error) {
+	identifierNames := r.cfg.ResourceMutuallyExclusiveIdentifiers(r.Names.Original)
+	fields := make([]*Field, 0, len(identifierNames))
+	for _, identifierName := range identifierNames {
+		fPath := names.New(identifierName).Camel
+		field, found := r.Fields[fPath]
+		if !found {
+			return nil, fmt.Errorf(
+				"could not find field with path %s for mutually_exclusive_identifiers entry %s",
+				fPath, identifierName,
+			)
+		}
+		fields = append(fields, field)
+	}
+	return fields, nil
+}
+
+// IsMutuallyExclusiveIdentifier returns true if the given field is one of the
+// resource's configured mutually-exclusive identifier fields.
+func (r *CRD) IsMutuallyExclusiveIdentifier(f *Field) bool {
+	if f == nil {
+		return false
+	}
+	for _, identifierName := range r.cfg.ResourceMutuallyExclusiveIdentifiers(r.Names.Original) {
+		if names.New(identifierName).Camel == f.Names.Camel {
+			return true
+		}
+	}
+	return false
 }
 
 // GetPrimaryKeyField returns the field designated as the primary key, nil if

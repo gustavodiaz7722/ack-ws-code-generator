@@ -44,7 +44,36 @@ func ValidateConfig(
 
 	errs = append(errs, validateRenameOperations(cfg, sdkOperations)...)
 	errs = append(errs, validateIgnoredOperations(cfg, sdkOperations)...)
+	errs = append(errs, validateMutuallyExclusiveIdentifiers(cfg)...)
 
+	return errs
+}
+
+// validateMutuallyExclusiveIdentifiers checks that a resource's
+// mutually_exclusive_identifiers configuration is internally consistent: it
+// must list at least two fields (a single identifier is not mutually exclusive
+// with anything) and cannot be combined with is_arn_primary_key, since an
+// ARN-primary resource always requires its ARN.
+func validateMutuallyExclusiveIdentifiers(cfg *Config) []error {
+	var errs []error
+	for resName, resCfg := range cfg.Resources {
+		identifiers := resCfg.MutuallyExclusiveIdentifiers
+		if len(identifiers) == 0 {
+			continue
+		}
+		if len(identifiers) < 2 {
+			errs = append(errs, fmt.Errorf(
+				"resources.%s.mutually_exclusive_identifiers: must list at least two fields, got %d",
+				resName, len(identifiers),
+			))
+		}
+		if resCfg.IsARNPrimaryKey {
+			errs = append(errs, fmt.Errorf(
+				"resources.%s.mutually_exclusive_identifiers: cannot be combined with is_arn_primary_key",
+				resName,
+			))
+		}
+	}
 	return errs
 }
 

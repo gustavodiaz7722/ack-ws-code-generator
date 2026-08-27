@@ -927,6 +927,47 @@ func optionalFieldGuardConstructor(
 	return out
 }
 
+// mutuallyExclusiveIdentifierGuardConstructor returns Go code that counts how
+// many of the given mutually-exclusive identifier fields are present in the
+// source map and returns a terminal error unless exactly one is supplied. This
+// prevents an empty or misspelled adoption annotation from silently matching an
+// arbitrary resource:
+//
+//	exclusiveIdentifierCount := 0
+//	if _, ok := fields["policyName"]; ok {
+//		exclusiveIdentifierCount++
+//	}
+//	if _, ok := fields["resourceARN"]; ok {
+//		exclusiveIdentifierCount++
+//	}
+//	if exclusiveIdentifierCount != 1 {
+//		return ackerrors.NewTerminalError(fmt.Errorf("adoption requires exactly one of: policyName, resourceARN"))
+//	}
+func mutuallyExclusiveIdentifierGuardConstructor(
+	// identifierFields are the annotation keys of the mutually-exclusive
+	// identifier fields, in configured order
+	identifierFields []string,
+	// String representing the fields map that contains the fields for adoption
+	sourceVarName string,
+	// Number of levels of indentation to use
+	indentLevel int,
+) string {
+	indent := strings.Repeat("\t", indentLevel)
+	out := fmt.Sprintf("%sexclusiveIdentifierCount := 0\n", indent)
+	for _, identifierField := range identifierFields {
+		out += fmt.Sprintf("%sif _, ok := %s[\"%s\"]; ok {\n", indent, sourceVarName, identifierField)
+		out += fmt.Sprintf("%s\texclusiveIdentifierCount++\n", indent)
+		out += fmt.Sprintf("%s}\n", indent)
+	}
+	out += fmt.Sprintf("%sif exclusiveIdentifierCount != 1 {\n", indent)
+	out += fmt.Sprintf(
+		"%s\treturn ackerrors.NewTerminalError(fmt.Errorf(\"adoption requires exactly one of: %s\"))\n",
+		indent, strings.Join(identifierFields, ", "),
+	)
+	out += fmt.Sprintf("%s}\n", indent)
+	return out
+}
+
 // SetResourceGetAttributes returns the Go code that sets the Status fields
 // from the Output shape returned from a resource's GetAttributes operation.
 //
@@ -1422,6 +1463,22 @@ func PopulateResourceFromAnnotation(
 	indent := strings.Repeat("\t", indentLevel)
 	arnOut := "\n"
 	out := "\n"
+	// When the resource is identified by exactly one of several
+	// mutually-exclusive identifiers, emit a guard that requires exactly one of
+	// them to be present in the adoption annotation. This runs before any field
+	// is populated so an empty or misspelled annotation fails with an actionable
+	// terminal error instead of silently matching an arbitrary resource.
+	if r.HasMutuallyExclusiveIdentifiers() {
+		identifierFields, meErr := r.GetMutuallyExclusiveIdentifierFields()
+		if meErr != nil {
+			return "", meErr
+		}
+		identifierKeys := make([]string, 0, len(identifierFields))
+		for _, identifierField := range identifierFields {
+			identifierKeys = append(identifierKeys, identifierField.Names.CamelLower)
+		}
+		out += mutuallyExclusiveIdentifierGuardConstructor(identifierKeys, sourceVarName, indentLevel)
+	}
 	// Check if the CRD defines the primary keys
 	primaryKeyConditionalOut := "\n"
 	primaryKeyConditionalOut += requiredFieldGuardContructor("resourceARN", sourceVarName, "arn", indentLevel)
@@ -1447,9 +1504,10 @@ func PopulateResourceFromAnnotation(
 	if isPrimarySet {
 		memberPath, _ := findFieldInCR(cfg, r, primaryField.Names.Original)
 		targetVarPath := fmt.Sprintf("%s%s", targetVarName, memberPath)
-		if r.IsPrimaryKeyOptional() {
-			// The primary key is optional for adoption: set it when the
-			// annotation supplies it, but do not require it.
+		if r.IsMutuallyExclusiveIdentifier(primaryField) {
+			// The primary key is one of several mutually-exclusive identifiers:
+			// set it when the annotation supplies it, but do not require it. The
+			// exactly-one guard emitted above ensures some identifier is present.
 			primaryKeyOut += optionalFieldGuardConstructor("primaryKey", sourceVarName, primaryField.Names.CamelLower, indentLevel)
 			primaryKeyOut += setResourceIdentifierPrimaryIdentifierAnn(
 				"&primaryKey",
@@ -1545,12 +1603,14 @@ func PopulateResourceFromAnnotation(
 		sourceVarPath := fmt.Sprintf("%s%s", targetVarName, memberPath)
 		if inputShape.IsRequired(memberName) || isPrimaryIdentifier {
 			requiredFieldVarName := fmt.Sprintf("f%d", memberIndex)
-			if isPrimaryIdentifier && r.IsPrimaryKeyOptional() {
-				// The auto-discovered primary key is optional for adoption: set
-				// it when the annotation supplies it, but do not require it.
-				// This mirrors the explicit is_primary_key handling above.
-				// (Note: is_primary_key_optional has no effect for ARN primary
-				// keys, which return early and always require the ARN.)
+			if r.IsMutuallyExclusiveIdentifier(targetField) {
+				// This identifier (whether the auto-discovered primary key or a
+				// member the read op marks required) is one of several
+				// mutually-exclusive identifiers: set it when the annotation
+				// supplies it, but do not require it individually. The
+				// exactly-one guard emitted above enforces that one is present.
+				// Fields that are genuinely required and are not declared
+				// mutually-exclusive keep their required-field guard below.
 				primaryKeyOut += optionalFieldGuardConstructor(requiredFieldVarName, sourceVarName, targetField.Names.CamelLower, indentLevel)
 				primaryKeyOut += setResourceIdentifierPrimaryIdentifierAnn(
 					fmt.Sprintf("&%s", requiredFieldVarName),

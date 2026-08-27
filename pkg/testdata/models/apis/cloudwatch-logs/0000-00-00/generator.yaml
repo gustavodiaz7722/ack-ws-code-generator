@@ -1,0 +1,46 @@
+# Minimal generator config used by the code-generator unit tests to exercise
+# mutually_exclusive_identifiers on a resource whose ReadMany operation has no
+# required members (CloudWatch Logs ResourcePolicy). Account-scoped policies are
+# keyed by PolicyName and resource-scoped policies by ResourceArn; exactly one
+# is supplied at adoption time.
+ignore:
+  # Only ResourcePolicy is needed for these tests. Ignore every other resource
+  # that would otherwise be generated from a Create* operation.
+  resource_names:
+    - Delivery
+    - ExportTask
+    - ImportTask
+    - LogAnomalyDetector
+    - LogGroup
+    - LogStream
+    - LookupTable
+    - ScheduledQuery
+  field_paths:
+    # PolicyScope is not an identifier: it is inferred from whether PolicyName
+    # (ACCOUNT) or ResourceArn (RESOURCE) is set, so it must not appear as an
+    # adoption field.
+    - DescribeResourcePoliciesInput.PolicyScope
+    - PutResourcePolicyInput.ExpectedRevisionId
+operations:
+  PutResourcePolicy:
+    resource_name: ResourcePolicy
+    # PutResourcePolicy is an idempotent upsert serving as both Create and
+    # Update.
+    operation_type:
+      - Create
+      - Update
+    output_wrapper_field_path: ResourcePolicy
+  DescribeResourcePolicies:
+    resource_name: ResourcePolicy
+    operation_type:
+      - List
+resources:
+  ResourcePolicy:
+    # ResourcePolicy has no single mandatory identifier: exactly one of
+    # PolicyName (account-scoped) or ResourceArn (resource-scoped) is supplied.
+    mutually_exclusive_identifiers:
+      - PolicyName
+      - ResourceArn
+    fields:
+      PolicyName:
+        is_primary_key: true
