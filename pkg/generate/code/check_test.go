@@ -165,6 +165,65 @@ func TestCheckRequiredFields_StatusField_ReadMany_EgressOnlyIGW(t *testing.T) {
 	)
 }
 
+func TestCheckRequiredFields_MutuallyExclusiveIdentifiers_ReadOne(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	g := testutil.NewModelForServiceWithOptions(t, "opensearchserverless", &testutil.TestingModelOptions{
+		GeneratorConfigFile: "generator-with-mutually-exclusive-identifiers.yaml",
+	})
+
+	crd := testutil.GetCRDByName(t, g, "SecurityPolicy")
+	require.NotNil(crd)
+	require.True(crd.HasMutuallyExclusiveIdentifiers())
+
+	// GetSecurityPolicy (ReadOne) marks both `name` and `type` required.
+	// Declaring them mutually exclusive drops each from the per-field `||` list
+	// and collapses them into a single grouped condition that is true only when
+	// neither identifier is set.
+	expRequiredFieldsCode := `
+	return (r.ko.Spec.Name == nil && r.ko.Spec.Type == nil)
+`
+	gotCode, err := code.CheckRequiredFieldsMissingFromShape(
+		crd, model.OpTypeGet, "r.ko", 1,
+	)
+	require.NoError(err)
+	assert.Equal(
+		strings.TrimSpace(expRequiredFieldsCode),
+		strings.TrimSpace(gotCode),
+	)
+}
+
+func TestCheckRequiredFields_MutuallyExclusiveIdentifiers_ReadMany(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	g := testutil.NewModelForServiceWithOptions(t, "cloudwatch-logs", &testutil.TestingModelOptions{
+		GeneratorConfigFile: "generator.yaml",
+	})
+
+	crd := testutil.GetCRDByName(t, g, "ResourcePolicy")
+	require.NotNil(crd)
+	require.True(crd.HasMutuallyExclusiveIdentifiers())
+
+	// DescribeResourcePolicies has no required input members, so without
+	// mutually_exclusive_identifiers this would generate `return false` and let
+	// sdkFind match an arbitrary policy. Instead, the read input is treated as
+	// incomplete unless at least one of the declared identifiers is set, which
+	// is what the controller previously had to supply via a custom method.
+	expRequiredFieldsCode := `
+	return r.ko.Spec.PolicyName == nil && r.ko.Spec.ResourceARN == nil
+`
+	gotCode, err := code.CheckRequiredFieldsMissingFromShape(
+		crd, model.OpTypeList, "r.ko", 1,
+	)
+	require.NoError(err)
+	assert.Equal(
+		strings.TrimSpace(expRequiredFieldsCode),
+		strings.TrimSpace(gotCode),
+	)
+}
+
 func TestCheckNilFieldPath(t *testing.T) {
 	// Empty FieldPath
 	field := model.Field{Path: ""}

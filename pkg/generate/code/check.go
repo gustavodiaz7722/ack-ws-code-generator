@@ -96,6 +96,42 @@ func CheckRequiredFieldsMissingFromShape(
 	)
 }
 
+// mutuallyExclusiveIdentifierNilConditions returns, for each of the resource's
+// configured mutually-exclusive identifier fields, a "<path> == nil" condition
+// string, along with the set of CR paths so callers can exclude them from
+// per-field required checks. The resource is uniquely identified by exactly one
+// of these fields, so it is considered incomplete only when all of them are
+// nil. Returns nil slices when the resource has no mutually-exclusive
+// identifiers.
+func mutuallyExclusiveIdentifierNilConditions(
+	r *model.CRD,
+	koVarName string,
+) ([]string, map[string]bool, error) {
+	if !r.HasMutuallyExclusiveIdentifiers() {
+		return nil, nil, nil
+	}
+	identifierFields, err := r.GetMutuallyExclusiveIdentifierFields()
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := r.Config()
+	conditions := make([]string, 0, len(identifierFields))
+	paths := make(map[string]bool, len(identifierFields))
+	for _, identifierField := range identifierFields {
+		memberPath, targetField := findFieldInCR(cfg, r, identifierField.Names.Original)
+		if targetField == nil {
+			return nil, nil, fmt.Errorf(
+				"resource %q: mutually_exclusive_identifiers field %q is not in the CR's Spec or Status",
+				r.Names.Original, identifierField.Names.Original,
+			)
+		}
+		path := fmt.Sprintf("%s%s.%s", koVarName, memberPath, targetField.Path)
+		conditions = append(conditions, fmt.Sprintf("%s == nil", path))
+		paths[path] = true
+	}
+	return conditions, paths, nil
+}
+
 func checkRequiredFieldsMissingFromShape(
 	r *model.CRD,
 	koVarName string,
@@ -104,7 +140,26 @@ func checkRequiredFieldsMissingFromShape(
 	shape *awssdkmodel.Shape,
 ) (string, error) {
 	indent := strings.Repeat("\t", indentLevel)
+
+	// When the resource declares mutually-exclusive identifiers, the resource is
+	// uniquely identified by exactly one of the declared fields. Build a single
+	// grouped condition that is true only when none of them are set, and collect
+	// their CR paths so they are not required individually below. This makes the
+	// generated check treat the input as incomplete unless at least one
+	// identifier is present, mirroring the ReadMany handling.
+	exclusiveConditions, exclusivePaths, err := mutuallyExclusiveIdentifierNilConditions(r, koVarName)
+	if err != nil {
+		return "", err
+	}
+	exclusiveGroupCondition := ""
+	if len(exclusiveConditions) > 0 {
+		exclusiveGroupCondition = fmt.Sprintf("(%s)", strings.Join(exclusiveConditions, " && "))
+	}
+
 	if shape == nil || len(shape.Required) == 0 {
+		if exclusiveGroupCondition != "" {
+			return fmt.Sprintf("%sreturn %s\n", indent, exclusiveGroupCondition), nil
+		}
 		return fmt.Sprintf("%sreturn false", indent), nil
 	}
 
@@ -144,7 +199,15 @@ func checkRequiredFieldsMissingFromShape(
 				r.Names.Original, memberName, shape.ShapeName,
 			)
 		}
+		// Mutually-exclusive identifiers are not required individually; they are
+		// covered by the grouped condition appended below.
+		if exclusivePaths[resVarPath] {
+			continue
+		}
 		missing = append(missing, fmt.Sprintf("%s == nil", resVarPath))
+	}
+	if exclusiveGroupCondition != "" {
+		missing = append(missing, exclusiveGroupCondition)
 	}
 	// Use '||' because if any of the required fields are missing the object
 	// is not created yet
@@ -177,6 +240,21 @@ func checkRequiredFieldsMissingFromShapeReadMany(
 ) string {
 	indent := strings.Repeat("\t", indentLevel)
 	result := fmt.Sprintf("%sreturn false", indent)
+
+	// When the resource declares mutually-exclusive identifiers, the ReadMany
+	// input typically has no required members, so the default `return false`
+	// would let sdkFind list every resource and match an arbitrary one. Instead,
+	// treat the read input as incomplete (returning true so sdkFind bails out
+	// with NotFound) unless at least one of the declared identifiers is set on
+	// the resource. The mutually_exclusive_identifiers guard in
+	// PopulateResourceFromAnnotation still rejects supplying more than one.
+	if r.HasMutuallyExclusiveIdentifiers() {
+		exclusiveConditions, _, err := mutuallyExclusiveIdentifierNilConditions(r, koVarName)
+		if err != nil {
+			return result
+		}
+		return fmt.Sprintf("%sreturn %s\n", indent, strings.Join(exclusiveConditions, " && "))
+	}
 
 	reqIdentifier, _ := FindPluralizedIdentifiersInShape(r, shape, op)
 	resVarPath, err := r.GetSanitizedMemberPath(reqIdentifier, op, koVarName)
