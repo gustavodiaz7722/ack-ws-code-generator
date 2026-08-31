@@ -212,7 +212,7 @@ func TestCheckRequiredFields_MutuallyExclusiveIdentifiers_ReadMany(t *testing.T)
 	// incomplete unless at least one of the declared identifiers is set, which
 	// is what the controller previously had to supply via a custom method.
 	expRequiredFieldsCode := `
-	return r.ko.Spec.PolicyName == nil && r.ko.Spec.ResourceARN == nil
+	return (r.ko.Spec.PolicyName == nil && r.ko.Spec.ResourceARN == nil)
 `
 	gotCode, err := code.CheckRequiredFieldsMissingFromShape(
 		crd, model.OpTypeList, "r.ko", 1,

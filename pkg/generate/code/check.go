@@ -77,7 +77,7 @@ func CheckRequiredFieldsMissingFromShape(
 	case model.OpTypeList:
 		op = r.Ops.ReadMany
 		return checkRequiredFieldsMissingFromShapeReadMany(
-			r, koVarName, indentLevel, op, op.InputRef.Shape), nil
+			r, koVarName, indentLevel, op, op.InputRef.Shape)
 	case model.OpTypeGetAttributes:
 		op = r.Ops.GetAttributes
 	case model.OpTypeSetAttributes:
@@ -237,7 +237,7 @@ func checkRequiredFieldsMissingFromShapeReadMany(
 	indentLevel int,
 	op *awssdkmodel.Operation,
 	shape *awssdkmodel.Shape,
-) string {
+) (string, error) {
 	indent := strings.Repeat("\t", indentLevel)
 	result := fmt.Sprintf("%sreturn false", indent)
 
@@ -246,24 +246,25 @@ func checkRequiredFieldsMissingFromShapeReadMany(
 	// would let sdkFind list every resource and match an arbitrary one. Instead,
 	// treat the read input as incomplete (returning true so sdkFind bails out
 	// with NotFound) unless at least one of the declared identifiers is set on
-	// the resource. The mutually_exclusive_identifiers guard in
-	// PopulateResourceFromAnnotation still rejects supplying more than one.
+	// the resource.
 	if r.HasMutuallyExclusiveIdentifiers() {
 		exclusiveConditions, _, err := mutuallyExclusiveIdentifierNilConditions(r, koVarName)
 		if err != nil {
-			return result
+			return "", err
 		}
-		return fmt.Sprintf("%sreturn %s\n", indent, strings.Join(exclusiveConditions, " && "))
+		// Parenthesize the grouped condition to mirror the ReadOne handling and
+		// stay correct if a future term is ever joined here with `||`.
+		return fmt.Sprintf("%sreturn (%s)\n", indent, strings.Join(exclusiveConditions, " && ")), nil
 	}
 
 	reqIdentifier, _ := FindPluralizedIdentifiersInShape(r, shape, op)
 	resVarPath, err := r.GetSanitizedMemberPath(reqIdentifier, op, koVarName)
 	if err != nil {
-		return result
+		return result, nil
 	}
 
 	result = fmt.Sprintf("%s == nil", resVarPath)
-	return fmt.Sprintf("%sreturn %s\n", indent, result)
+	return fmt.Sprintf("%sreturn %s\n", indent, result), nil
 }
 
 // CheckNilFieldPath returns the condition statement for Nil check

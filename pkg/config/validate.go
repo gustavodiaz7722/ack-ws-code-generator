@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/aws-controllers-k8s/pkg/names"
 )
 
 // ValidateConfig checks that generator.yaml references to SDK operations are
@@ -52,8 +54,10 @@ func ValidateConfig(
 // validateMutuallyExclusiveIdentifiers checks that a resource's
 // mutually_exclusive_identifiers configuration is internally consistent: it
 // must list at least two fields (a single identifier is not mutually exclusive
-// with anything) and cannot be combined with is_arn_primary_key, since an
-// ARN-primary resource always requires its ARN.
+// with anything), the fields must be distinct after name normalization (two
+// entries that resolve to the same CR field can never be "exactly one"), and it
+// cannot be combined with is_arn_primary_key, since an ARN-primary resource
+// always requires its ARN.
 func validateMutuallyExclusiveIdentifiers(cfg *Config) []error {
 	var errs []error
 	for resName, resCfg := range cfg.Resources {
@@ -66,6 +70,22 @@ func validateMutuallyExclusiveIdentifiers(cfg *Config) []error {
 				"resources.%s.mutually_exclusive_identifiers: must list at least two fields, got %d",
 				resName, len(identifiers),
 			))
+		}
+		// Entries are resolved to CR fields by camel-casing the name (see
+		// CRD.GetMutuallyExclusiveIdentifierFields), so e.g. "PolicyName" and
+		// "policyName" collapse to the same field. Reject duplicates after
+		// normalization: the generated exactly-one guard would otherwise count
+		// the same field twice and adoption could never satisfy it.
+		seen := make(map[string]bool, len(identifiers))
+		for _, id := range identifiers {
+			norm := names.New(id).Camel
+			if seen[norm] {
+				errs = append(errs, fmt.Errorf(
+					"resources.%s.mutually_exclusive_identifiers: %q resolves to the same field as another entry",
+					resName, id,
+				))
+			}
+			seen[norm] = true
 		}
 		if resCfg.IsARNPrimaryKey {
 			errs = append(errs, fmt.Errorf(
