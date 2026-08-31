@@ -1,0 +1,37 @@
+# Variant of generator.yaml used to exercise mutually_exclusive_identifiers on
+# a resource whose identifier fields flow through the required/auto-discovered
+# primary identifier branch of PopulateResourceFromAnnotation (SecurityPolicy's
+# `name` is the auto-discovered primary identifier and `type` is a required
+# member of the read operation input). Declaring them mutually exclusive relaxes
+# each individual field to optional and emits the exactly-one guard.
+ignore:
+  resource_names:
+      - AccessPolicy
+      - Collection
+      - LifecyclePolicy
+      - SecurityConfig
+      # - SecurityPolicy
+      - VpcEndpoint
+  field_paths:
+      - CreateSecurityPolicyOutput.SecurityPolicyDetail.Policy
+      - CreateSecurityPolicyOutput.SecurityPolicyDetail.ClientToken
+      - CreateSecurityPolicyInput.ClientToken
+resources:
+  SecurityPolicy:
+    # `name` and `type` are not truly mutually exclusive for SecurityPolicy;
+    # this config exists only to exercise the generator branch that relaxes the
+    # auto-discovered primary identifier and a required read-input member.
+    mutually_exclusive_identifiers:
+      - Name
+      - Type
+    tags:
+      ignore: true
+    fields:
+      Type:
+        go_tag: json:"type"
+        is_immutable: true
+      Policy:
+        compare:
+          is_ignored: true
+      Name:
+        is_immutable: true

@@ -1802,6 +1802,94 @@ func TestSetResource_EKS_Cluster_PopulateResourceFromAnnotation(t *testing.T) {
 	assert.Equal(expected, got)
 }
 
+func TestSetResource_CloudWatchLogs_ResourcePolicy_MutuallyExclusiveIdentifiers_PopulateResourceFromAnnotation(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	g := testutil.NewModelForServiceWithOptions(t, "cloudwatch-logs", &testutil.TestingModelOptions{
+		GeneratorConfigFile: "generator.yaml",
+	})
+
+	crd := testutil.GetCRDByName(t, g, "ResourcePolicy")
+	require.NotNil(crd)
+	require.True(crd.HasMutuallyExclusiveIdentifiers())
+
+	// ResourcePolicy is identified by exactly one of PolicyName (account-scoped)
+	// or ResourceArn (resource-scoped), and DescribeResourcePolicies has no
+	// required members. mutually_exclusive_identifiers emits an exactly-one
+	// guard that returns a terminal error when the adoption annotation supplies
+	// neither identifier (empty or misspelled) or both, then populates whichever
+	// identifier is present.
+	expected := `
+	exclusiveIdentifierCount := 0
+	if _, ok := fields["policyName"]; ok {
+		exclusiveIdentifierCount++
+	}
+	if _, ok := fields["resourceARN"]; ok {
+		exclusiveIdentifierCount++
+	}
+	if exclusiveIdentifierCount != 1 {
+		return ackerrors.NewTerminalError(fmt.Errorf("adoption requires exactly one of: policyName, resourceARN"))
+	}
+	primaryKey, ok := fields["policyName"]
+	if ok {
+		r.ko.Spec.PolicyName = &primaryKey
+	}
+
+	f2, f2ok := fields["resourceARN"]
+	if f2ok {
+		r.ko.Spec.ResourceARN = aws.String(f2)
+	}
+`
+	got, err := code.PopulateResourceFromAnnotation(crd.Config(), crd, "fields", "r.ko", 1)
+	require.NoError(err)
+	assert.Equal(expected, got)
+}
+
+func TestSetResource_OpensearchServerless_SecurityPolicy_MutuallyExclusiveIdentifiers_PopulateResourceFromAnnotation(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	g := testutil.NewModelForServiceWithOptions(t, "opensearchserverless", &testutil.TestingModelOptions{
+		GeneratorConfigFile: "generator-with-mutually-exclusive-identifiers.yaml",
+	})
+
+	crd := testutil.GetCRDByName(t, g, "SecurityPolicy")
+	require.NotNil(crd)
+	require.True(crd.HasMutuallyExclusiveIdentifiers())
+
+	// `name` is the auto-discovered primary identifier and `type` is a required
+	// member of the read operation input. Declaring them mutually exclusive
+	// routes both through the primary/required identifier branch but emits the
+	// optional `if ok` guard instead of a required-field guard, alongside the
+	// exactly-one terminal guard. This is the branch that previously dropped the
+	// guard for a genuinely-required field unconditionally.
+	expected := `
+	exclusiveIdentifierCount := 0
+	if _, ok := fields["name"]; ok {
+		exclusiveIdentifierCount++
+	}
+	if _, ok := fields["type_"]; ok {
+		exclusiveIdentifierCount++
+	}
+	if exclusiveIdentifierCount != 1 {
+		return ackerrors.NewTerminalError(fmt.Errorf("adoption requires exactly one of: name, type_"))
+	}
+	f0, ok := fields["name"]
+	if ok {
+		r.ko.Spec.Name = &f0
+	}
+	f1, ok := fields["type_"]
+	if ok {
+		r.ko.Spec.Type = &f1
+	}
+
+`
+	got, err := code.PopulateResourceFromAnnotation(crd.Config(), crd, "fields", "r.ko", 1)
+	require.NoError(err)
+	assert.Equal(expected, got)
+}
+
 func TestSetResource_OpensearchServerless_SecurityPolicy_PopulateResourceFromAnnotation(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)

@@ -238,6 +238,64 @@ func TestValidateConfig_ErrorMessageIncludesAvailable(t *testing.T) {
 	}
 }
 
+func TestValidateMutuallyExclusiveIdentifiers(t *testing.T) {
+	testCases := []struct {
+		name         string
+		resourceCfg  ResourceConfig
+		expectedErrs int
+	}{
+		{
+			name: "valid two identifiers",
+			resourceCfg: ResourceConfig{
+				MutuallyExclusiveIdentifiers: []string{"PolicyName", "ResourceArn"},
+			},
+			expectedErrs: 0,
+		},
+		{
+			name:         "unset is allowed",
+			resourceCfg:  ResourceConfig{},
+			expectedErrs: 0,
+		},
+		{
+			name: "single identifier is invalid",
+			resourceCfg: ResourceConfig{
+				MutuallyExclusiveIdentifiers: []string{"PolicyName"},
+			},
+			expectedErrs: 1,
+		},
+		{
+			name: "incompatible with is_arn_primary_key",
+			resourceCfg: ResourceConfig{
+				MutuallyExclusiveIdentifiers: []string{"PolicyName", "ResourceArn"},
+				IsARNPrimaryKey:              true,
+			},
+			expectedErrs: 1,
+		},
+		{
+			name: "single identifier and arn primary key reports both",
+			resourceCfg: ResourceConfig{
+				MutuallyExclusiveIdentifiers: []string{"PolicyName"},
+				IsARNPrimaryKey:              true,
+			},
+			expectedErrs: 2,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				Resources: map[string]ResourceConfig{
+					"ResourcePolicy": tc.resourceCfg,
+				},
+			}
+			errs := validateMutuallyExclusiveIdentifiers(cfg)
+			if len(errs) != tc.expectedErrs {
+				t.Errorf("expected %d errors, got %d: %v", tc.expectedErrs, len(errs), errs)
+			}
+		})
+	}
+}
+
 func TestFormatAvailableTruncated(t *testing.T) {
 	items := []string{"A", "B", "C", "D", "E"}
 	got := formatAvailableTruncated(items, 3)
