@@ -503,3 +503,166 @@ func getReferencedStateForField(field *model.Field, indentLevel int) string {
 
 	return out
 }
+
+// hasCollectionAncestor reports whether a collection lies on the path to a field's
+// reference (`*Ref`) sibling.
+//
+// It returns true for a list. A map ancestor is rejected with an error instead: a
+// reference cannot be addressed through a map at all, so there is nothing sensible
+// to generate.
+//
+// Only ancestors count. A reference field that is itself a list (`*Refs`, whose
+// concrete sibling is a list of scalars) is the leaf rather than part of the path,
+// so nothing has to be indexed to reach it.
+//
+// EnsureReferences uses this to skip such a reference; see its doc comment.
+func hasCollectionAncestor(field *model.Field) (bool, error) {
+	r := field.CRD
+	refFieldPath, err := field.ReferenceFieldPath()
+	if err != nil {
+		return false, err
+	}
+	fp := fieldpath.FromString(refFieldPath)
+	for depth := 0; depth < fp.Size()-1; depth++ {
+		curFP := fp.CopyAt(depth).String()
+		cur, ok := r.Fields[curFP]
+		if !ok {
+			return false, fmt.Errorf(
+				"resource %q: unable to find field with path %q", r.Kind, curFP,
+			)
+		}
+		if cur.ShapeRef.Shape.Type == "map" {
+			return false, fmt.Errorf(
+				"resource %q, field %q: references cannot be within a map",
+				r.Kind, field.Path,
+			)
+		}
+		if cur.ShapeRef.Shape.Type == "list" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// EnsureReferences returns Go code that restores, from a source object into a
+// target object, the cross-resource reference (`*Ref`) fields the target is
+// missing.
+//
+// A `*Ref` is a sibling of the concrete field it resolves into. A resource manager
+// builds its return value from an AWS API response, which has no concept of a
+// reference, so rebuilding the containing struct drops every `*Ref` inside it.
+// That disables ClearResolvedReferences, which suppresses a resolved value only
+// while the sibling `*Ref` is visible, so the spec patch deletes the declared
+// `*Ref` and stores the resolved value in its place. The next apply of the
+// manifest puts the `*Ref` back beside that value, a pair
+// validateReferenceFields rejects, stopping reconciliation. See
+// aws-controllers-k8s/community#2361 and #2431.
+//
+// Only a reference reached through STRUCTS is emitted. It has one fixed address,
+// so exactly that field is assigned and every value the service reported stands.
+//
+// A TOP-LEVEL reference is skipped: generated set-output code starts from a
+// DeepCopy of the object it was handed and overwrites only the concrete field, and
+// the `*Ref` is a sibling of that field rather than part of it, so nothing rebuilds
+// it. That holds for the generated paths; a hand-written set-output hook that
+// rebuilds the object wholesale could still drop it, in which case the hook has to
+// carry the reference across itself.
+//
+// A reference reached through a LIST is also skipped, and behaves as it does today.
+// It has no fixed address, so restoring it means pairing an element the service
+// reported with an element the user declared, and neither available key is sound:
+//
+//   - Position is not reliable, because an AWS response need not preserve the order
+//     of the request.
+//   - The resolved value is not reliable either, because it is not always unique.
+//     A reference resolves to whatever path `references.path` names, and while most
+//     name an AWS-assigned identifier, 75 of the roughly 470 references configured
+//     across the controllers resolve to a `Spec.*` path that carries no uniqueness
+//     guarantee. `sqs/Queue.Policy` and `sns/Topic.Policy`, for instance, resolve
+//     `iam/Policy` via `Spec.PolicyDocument` -- the policy document itself -- so two
+//     separate IAM policies granting the same thing resolve to the same value.
+//
+// Replacing the whole outermost list avoids having to pair anything, but discards
+// whatever the service populated inside it, which for an element carrying
+// AWS-assigned members (ec2's `NetworkACL.Associations`) means losing them from the
+// stored spec.
+//
+// A sound per-element restore needs a declared notion of element identity -- a set
+// of fields named in `generator.yaml` that uniquely identify an entry -- which is
+// left to a follow-up.
+//
+// Sample output:
+//
+//	if desiredKO.Spec.JWTConfiguration != nil && latestKO.Spec.JWTConfiguration != nil && desiredKO.Spec.JWTConfiguration.IssuerRef != nil && latestKO.Spec.JWTConfiguration.IssuerRef == nil {
+//		latestKO.Spec.JWTConfiguration.IssuerRef = desiredKO.Spec.JWTConfiguration.IssuerRef
+//	}
+func EnsureReferences(
+	r *model.CRD,
+	sourceVarName string,
+	targetVarName string,
+	indentLevel int,
+) (string, error) {
+	out := ""
+	indent := strings.Repeat("\t", indentLevel)
+	specField := r.Config().PrefixConfig.SpecField
+
+	for _, fieldName := range r.SortedFieldNames() {
+		field := r.Fields[fieldName]
+		if !field.HasReference() {
+			continue
+		}
+		refName, err := field.GetReferenceFieldName()
+		if err != nil {
+			return "", err
+		}
+		refFieldPath, err := field.ReferenceFieldPath()
+		if err != nil {
+			return "", err
+		}
+		fp := fieldpath.FromString(refFieldPath)
+
+		// A top-level reference has no parent to be rebuilt.
+		if fp.Size() < 2 {
+			continue
+		}
+
+		// A reference behind a list has no fixed address to assign to; see the doc
+		// comment.
+		inList, err := hasCollectionAncestor(field)
+		if err != nil {
+			return "", err
+		}
+		if inList {
+			continue
+		}
+
+		// Struct-only path: guard every ancestor on both objects, then assign
+		// just the reference when the target lacks it.
+		srcAccess := sourceVarName + specField
+		tgtAccess := targetVarName + specField
+		conds := make([]string, 0, fp.Size()*2)
+		for depth := 0; depth < fp.Size()-1; depth++ {
+			srcAccess = fmt.Sprintf("%s.%s", srcAccess, fp.At(depth))
+			tgtAccess = fmt.Sprintf("%s.%s", tgtAccess, fp.At(depth))
+			conds = append(conds, fmt.Sprintf("%s != nil", srcAccess))
+			conds = append(conds, fmt.Sprintf("%s != nil", tgtAccess))
+		}
+		srcRef := fmt.Sprintf("%s.%s", srcAccess, refName.Camel)
+		tgtRef := fmt.Sprintf("%s.%s", tgtAccess, refName.Camel)
+		if field.ShapeRef.Shape.Type == "list" {
+			// A list-of-references field is one value at a fixed address, so it
+			// is copied whole; length stands in for nil, as it does in
+			// ClearResolvedReferences for the same shape.
+			conds = append(conds, fmt.Sprintf("len(%s) > 0", srcRef))
+			conds = append(conds, fmt.Sprintf("len(%s) == 0", tgtRef))
+		} else {
+			conds = append(conds, fmt.Sprintf("%s != nil", srcRef))
+			conds = append(conds, fmt.Sprintf("%s == nil", tgtRef))
+		}
+		out += fmt.Sprintf("%sif %s {\n", indent, strings.Join(conds, " && "))
+		out += fmt.Sprintf("%s\t%s = %s\n", indent, tgtRef, srcRef)
+		out += fmt.Sprintf("%s}\n", indent)
+	}
+
+	return out, nil
+}
